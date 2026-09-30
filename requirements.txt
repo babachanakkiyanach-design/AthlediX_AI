@@ -5,3 +5,4 @@ pandas
 mediapipe
 inference-sdk
 scipy
+ffmpeg-python
