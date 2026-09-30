@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import tempfile
-import os
 import sqlite3
+import mediapipe as mp
 from collections import deque, defaultdict
 from datetime import datetime
 from ultralytics import YOLO
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS performance_history (
     position TEXT,
     timestamp TEXT,
     peak_speed REAL,
-    technique_metric REAL,
+    elbow_3d_angle REAL,
     ai_fatigue INTEGER,
     readiness_score REAL,
     performance_score REAL
@@ -46,31 +46,41 @@ CREATE TABLE IF NOT EXISTS performance_history (
 conn.commit()
 
 # =========================================================
-# 2. LOAD YOLOV8 MODEL
+# 2. LOAD ENSEMBLE MODELS (YOLOV8 + GOOGLE MEDIAPIPE)
 # =========================================================
 @st.cache_resource
-def load_yolo_model():
-    return YOLO("yolov8n-pose.pt")
+def load_models():
+    yolo_model = YOLO("yolov8n-pose.pt")
+    mp_pose = mp.solutions.pose
+    pose_3d = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=2,
+        enable_segmentation=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    return yolo_model, pose_3d, mp_pose
 
-model = load_yolo_model()
+model, mp_pose_engine, mp_draw = load_models()
 
 # =========================================================
-# 3. HELPER FUNCTIONS & BIOMECHANICS ENGINE
+# 3. HELPER & 3D BIOMECHANICS FUNCTIONS
 # =========================================================
-def calculate_angle(a, b, c):
-    """Calculates joint angle in degrees."""
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
-    angle = np.abs(radians * 180.0 / np.pi)
-    if angle > 180.0:
-        angle = 360.0 - angle
-    return int(angle)
+def calculate_3d_angle(a, b, c):
+    """Calculates true 3D joint angle using X, Y, Z coordinates."""
+    a = np.array([a.x, a.y, a.z])
+    b = np.array([b.x, b.y, b.z])
+    c = np.array([c.x, c.y, c.z])
+
+    ba = a - b
+    bc = c - b
+
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
+    return int(np.degrees(angle))
 
 def calculate_ai_fatigue(angle_variance, speed_decay):
-    """
-    AI Automatic Fatigue Scoring (1 = Fresh, 5 = Exhausted)
-    Based on joint stability variance and velocity drop-off.
-    """
+    """AI Automatic Fatigue Scoring (1 = Fresh, 5 = Exhausted)."""
     fatigue_index = (angle_variance * 0.4) + (speed_decay * 0.6)
     if fatigue_index < 12.0:
         return 1
@@ -84,7 +94,7 @@ def calculate_ai_fatigue(angle_variance, speed_decay):
         return 5
 
 def calculate_readiness_score(height_cm, weight_kg, matches_this_week, ai_fatigue_level):
-    """Calculates Match Readiness Score using AI fatigue index (0% - 100%)."""
+    """Calculates Match Readiness Score (0% - 100%)."""
     base_readiness = 100.0
     workload_deduction = matches_this_week * 7.5
     fatigue_deduction = (ai_fatigue_level - 1) * 12.0
@@ -99,37 +109,30 @@ def calculate_readiness_score(height_cm, weight_kg, matches_this_week, ai_fatigu
 # =========================================================
 # 4. STREAMLIT APP UI
 # =========================================================
-st.set_page_config(page_title="AthlediX AI Multi-Bowler Engine", layout="wide", page_icon="🏆")
+st.set_page_config(page_title="AthlediX AI Engine", layout="wide", page_icon="🏆")
 
-st.title("🏆 AthlediX AI: Multi-Bowler Tracking & Automatic AI Biomechanics")
-st.markdown("Multi-Bowler Real-Speed Tracking, Automatic AI Fatigue Detection & ICC Arm Legality Rules.")
+st.title("🏆 AthlediX AI: Hybrid Motion Engine")
+st.markdown("Powered by **Ultralytics YOLOv8** + **Google MediaPipe 3D Kinematics**.")
 
-tab1, tab2, tab3 = st.tabs(["📹 Multi-Bowler Motion Analysis", "📅 Day-by-Day History", "👤 Registered Roster"])
+tab1, tab2, tab3 = st.tabs(["📹 AI Motion Analysis", "📅 Day-by-Day History", "👤 Registered Roster"])
 
 cursor.execute("SELECT name FROM players")
 registered_players = [row[0] for row in cursor.fetchall()]
 
-# Bounding box color palette for multiple bowlers
-BOWLER_COLORS = [
-    (0, 255, 0),    # Lime Green
-    (255, 165, 0),  # Orange
-    (255, 0, 255),  # Magenta
-    (0, 255, 255),  # Cyan
-    (0, 128, 255)   # Blue-Orange
-]
+BOWLER_COLORS = [(0, 255, 0), (255, 165, 0), (255, 0, 255), (0, 255, 255)]
 
 # ---------------------------------------------------------
-# TAB 1: MULTI-BOWLER VIDEO ANALYSIS
+# TAB 1: MOTION ANALYSIS
 # ---------------------------------------------------------
 with tab1:
-    st.header("Upload Video (Single Bowler or Multi-Bowler Clip)")
+    st.header("Upload Video for Performance Analysis")
     
     col_u1, col_u2 = st.columns([2, 1])
     with col_u1:
         uploaded_video = st.file_uploader("Upload Bowling Clip (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
     with col_u2:
         if registered_players:
-            primary_player = st.selectbox("Primary Tagged Player (Optional)", registered_players)
+            primary_player = st.selectbox("Primary Tagged Athlete", registered_players)
         else:
             primary_player = st.text_input("Primary Athlete Name", value="Guest Bowler")
 
@@ -138,11 +141,11 @@ with tab1:
         tfile.write(uploaded_video.read())
         input_video_path = tfile.name
 
-        st.subheader("Raw Uploaded Clip")
+        st.subheader("Raw Video Input")
         st.video(input_video_path)
 
-        if st.button("🚀 Analyze All Bowlers & Find the Fastest"):
-            with st.spinner("Tracking multiple athletes and processing AI fatigue mechanics..."):
+        if st.button("🚀 Run Dual-Engine AI Pipeline"):
+            with st.spinner("Processing 3D kinematics and motion tracking..."):
                 cap = cv2.VideoCapture(input_video_path)
                 
                 fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -155,12 +158,10 @@ with tab1:
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
-                # Multi-Bowler tracking structures
                 bowler_speeds = defaultdict(list)
-                bowler_angles = defaultdict(list)
+                bowler_3d_angles = defaultdict(list)
                 prev_wrists = {}
                 prev_times = {}
-                wrist_trails = defaultdict(lambda: deque(maxlen=15))
 
                 while cap.isOpened():
                     ret, frame = cap.read()
@@ -168,83 +169,65 @@ with tab1:
                         break
 
                     curr_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-                    
-                    # Run YOLO Multi-Object Pose Tracking
-                    results = model.track(frame, persist=True, verbose=False)
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                    if results and len(results[0].keypoints) > 0 and results[0].boxes.id is not None:
-                        boxes = results[0].boxes
-                        track_ids = boxes.id.cpu().numpy().astype(int)
-                        keypoints_data = results[0].keypoints.data.cpu().numpy()
+                    # ENGINE 1: Safe YOLO Execution with Fallback
+                    try:
+                        yolo_results = model.track(frame, persist=True, verbose=False)
+                    except Exception:
+                        yolo_results = model(frame, verbose=False)
+
+                    # ENGINE 2: MediaPipe 3D Landmark Extraction
+                    mp_results = mp_pose_engine.process(rgb_frame)
+
+                    if yolo_results and len(yolo_results[0].keypoints) > 0:
+                        boxes = yolo_results[0].boxes
+                        has_ids = hasattr(boxes, 'id') and boxes.id is not None
+                        track_ids = boxes.id.cpu().numpy().astype(int) if has_ids else list(range(1, len(boxes) + 1))
+                        keypoints_data = yolo_results[0].keypoints.data.cpu().numpy()
 
                         for idx, track_id in enumerate(track_ids):
                             kpts = keypoints_data[idx]
 
-                            if len(kpts) >= 11:
-                                # Determine dynamic scale: height of torso/body in pixels to calculate real meters
-                                nose, ankle = kpts[0][:2], kpts[16][:2] if len(kpts) > 16 else kpts[10][:2]
-                                person_pixel_height = np.abs(ankle[1] - nose[1])
-                                if person_pixel_height > 50:
-                                    meters_per_px = 1.70 / float(person_pixel_height)
-                                else:
-                                    meters_per_px = 1.70 / 380.0
+                            if len(kpts) >= 17:
+                                person_px_h = np.abs(kpts[16][1] - kpts[0][1])
+                                meters_per_px = 1.70 / float(person_px_h) if person_px_h > 40 else 1.70 / 380.0
+                            else:
+                                meters_per_px = 1.70 / 380.0
 
-                                # Check Right vs Left arm visibility
-                                r_conf = kpts[6][2] + kpts[8][2] + kpts[10][2]
-                                l_conf = kpts[5][2] + kpts[7][2] + kpts[9][2]
+                            angle_3d = 160
+                            if mp_results.pose_world_landmarks:
+                                lm = mp_results.pose_world_landmarks.landmark
+                                r_shoulder, r_elbow, r_wrist = lm[12], lm[14], lm[16]
+                                angle_3d = calculate_3d_angle(r_shoulder, r_elbow, r_wrist)
+                                bowler_3d_angles[track_id].append(angle_3d)
 
-                                if r_conf >= l_conf and kpts[10][2] > 0.30:
-                                    s_pt, e_pt, w_pt = kpts[6][:2], kpts[8][:2], kpts[10][:2]
-                                elif l_conf > r_conf and kpts[9][2] > 0.30:
-                                    s_pt, e_pt, w_pt = kpts[5][:2], kpts[7][:2], kpts[9][:2]
-                                else:
-                                    s_pt, e_pt, w_pt = None, None, None
+                            if len(kpts) >= 11 and kpts[10][2] > 0.30:
+                                w_pt = kpts[10][:2]
+                                wx, wy = int(w_pt[0]), int(w_pt[1])
 
-                                if s_pt is not None and e_pt is not None and w_pt is not None:
-                                    sx, sy = int(s_pt[0]), int(s_pt[1])
-                                    ex, ey = int(e_pt[0]), int(e_pt[1])
-                                    wx, wy = int(w_pt[0]), int(w_pt[1])
+                                curr_speed = 0.0
+                                if track_id in prev_wrists and track_id in prev_times:
+                                    dt = curr_time - prev_times[track_id]
+                                    if dt > 0.005:
+                                        dist_px = np.sqrt((w_pt[0] - prev_wrists[track_id][0])**2 + (w_pt[1] - prev_wrists[track_id][1])**2)
+                                        speed_kmh = (dist_px * meters_per_px / dt) * 3.6
 
-                                    angle = calculate_angle(s_pt, e_pt, w_pt)
-                                    bowler_angles[track_id].append(angle)
+                                        if 15.0 < speed_kmh < 165.0:
+                                            bowler_speeds[track_id].append(speed_kmh)
+                                            curr_speed = speed_kmh
 
-                                    curr_speed = 0.0
-                                    if track_id in prev_wrists and track_id in prev_times:
-                                        dt = curr_time - prev_times[track_id]
-                                        if dt > 0.005:
-                                            dist_px = np.sqrt((w_pt[0] - prev_wrists[track_id][0])**2 + (w_pt[1] - prev_wrists[track_id][1])**2)
-                                            speed_kmh = (dist_px * meters_per_px / dt) * 3.6
+                                prev_wrists[track_id] = w_pt
+                                prev_times[track_id] = curr_time
 
-                                            # Bounded real bowling speeds (15 km/h to 165 km/h)
-                                            if 15.0 < speed_kmh < 165.0:
-                                                bowler_speeds[track_id].append(speed_kmh)
-                                                curr_speed = speed_kmh
+                                color = BOWLER_COLORS[(track_id - 1) % len(BOWLER_COLORS)]
+                                cv2.circle(frame, (wx, wy), 7, color, -1)
+                                cv2.putText(frame, f"Bowler #{track_id}: {curr_speed:.1f} km/h | 3D Arm: {angle_3d} deg",
+                                            (wx - 20, max(20, wy - 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                                    prev_wrists[track_id] = w_pt
-                                    prev_times[track_id] = curr_time
-                                    wrist_trails[track_id].append((wx, wy))
-
-                                    # Pick visual color for bowler ID
-                                    color = BOWLER_COLORS[(track_id - 1) % len(BOWLER_COLORS)]
-
-                                    # Draw Skeleton Lines
-                                    cv2.line(frame, (sx, sy), (ex, ey), color, 3)
-                                    cv2.line(frame, (ex, ey), (wx, wy), color, 3)
-                                    cv2.circle(frame, (wx, wy), 8, (0, 0, 255), -1)
-
-                                    # Motion trail
-                                    for t_idx in range(1, len(wrist_trails[track_id])):
-                                        cv2.line(frame, wrist_trails[track_id][t_idx - 1], wrist_trails[track_id][t_idx], color, 2)
-
-                                    # Label Box Above Head
-                                    label_text = f"Bowler #{track_id}: {curr_speed:.1f} km/h | {angle} deg"
-                                    cv2.putText(frame, label_text, (sx - 20, max(20, sy - 15)),
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-
-                    # Top Overlay Banner
                     cv2.rectangle(frame, (0, 0), (width, 40), (0, 0, 0), -1)
-                    cv2.putText(frame, "AthlediX AI: Multi-Bowler Tracking Active",
-                                (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+                    cv2.putText(frame, "AthlediX AI Engine: YOLOv8 Pose + Google MediaPipe 3D",
+                                (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
                     out.write(frame)
 
@@ -252,27 +235,24 @@ with tab1:
                 out.release()
 
                 st.markdown("---")
-                st.subheader("🎬 AI Annotated Multi-Bowler Output")
+                st.subheader("🎬 AI Output Video")
                 st.video(output_video_path)
 
-                # Process multi-bowler rankings
                 summary_data = []
                 fastest_id = None
                 highest_speed = -1.0
 
                 for b_id, speeds in bowler_speeds.items():
                     peak_s = max(speeds) if speeds else 0.0
-                    angles = bowler_angles[b_id]
-                    avg_a = np.mean(angles) if angles else 0.0
-                    ang_var = float(np.std(angles)) if angles else 0.0
+                    angles_3d = bowler_3d_angles[b_id]
+                    avg_a3d = np.mean(angles_3d) if angles_3d else 165.0
+                    ang_var = float(np.std(angles_3d)) if angles_3d else 0.0
                     
-                    # Calculate AI Automatic Fatigue
                     spd_decay = (speeds[0] - speeds[-1]) if len(speeds) > 3 else 0.0
                     ai_fatigue = calculate_ai_fatigue(ang_var, max(0.0, spd_decay))
 
-                    # Check ICC 15-degree Rule (Max extension flex)
-                    elbow_flex = (max(angles) - min(angles)) if angles else 0.0
-                    icc_status = "⚠️ Non-Compliant (>15° flex)" if elbow_flex > 15.0 else "✅ Legal Action"
+                    elbow_flex_3d = (max(angles_3d) - min(angles_3d)) if angles_3d else 0.0
+                    icc_status = "⚠️ Non-Compliant (>15° flex)" if elbow_flex_3d > 15.0 else "✅ Legal Action (ICC Compliant)"
 
                     if peak_s > highest_speed:
                         highest_speed = peak_s
@@ -281,21 +261,19 @@ with tab1:
                     summary_data.append({
                         "Bowler ID": f"Bowler #{b_id}",
                         "Peak Speed (km/h)": round(peak_s, 1),
-                        "Avg Arm Angle (deg)": round(avg_a, 1),
-                        "Elbow Flex Change": f"{elbow_flex:.1f}°",
+                        "Avg 3D Arm Angle": f"{round(avg_a3d, 1)}°",
+                        "3D Flex Change": f"{elbow_flex_3d:.1f}°",
                         "ICC Arm Legality": icc_status,
-                        "AI Fatigue Score (1-5)": f"{ai_fatigue} / 5"
+                        "AI Fatigue Level": f"{ai_fatigue} / 5"
                     })
 
-                # Display Multi-Bowler Leaderboard Table
-                st.subheader("⚡ Multi-Bowler Speed & AI Fatigue Breakdown")
+                st.subheader("⚡ Kinematics Leaderboard")
                 if summary_data:
                     df_summary = pd.DataFrame(summary_data)
                     st.dataframe(df_summary, use_container_width=True)
 
-                    st.success(f"🔥 **Fastest Bowler in Clip:** **Bowler #{fastest_id}** with a peak speed of **{highest_speed:.1f} km/h**!")
+                    st.success(f"🔥 **Fastest Bowler:** **Bowler #{fastest_id}** with peak speed of **{highest_speed:.1f} km/h**!")
 
-                    # Save Primary Tagged Player performance to database
                     cursor.execute("SELECT sport, position, height_cm, weight_kg, matches_this_week FROM players WHERE name = ?", (primary_player,))
                     p_prof = cursor.fetchone()
 
@@ -305,8 +283,8 @@ with tab1:
                         sport, position, height, weight, matches = "Cricket", "Fast Bowler", 175.0, 70.0
 
                     primary_speed = highest_speed
-                    primary_angle = summary_data[0]["Avg Arm Angle (deg)"] if summary_data else 165.0
-                    primary_fatigue = int(summary_data[0]["AI Fatigue Score (1-5)"].split()[0]) if summary_data else 2
+                    primary_angle = float(summary_data[0]["Avg 3D Arm Angle"].replace("°", "")) if summary_data else 165.0
+                    primary_fatigue = int(summary_data[0]["AI Fatigue Level"].split()[0]) if summary_data else 2
                     
                     readiness = calculate_readiness_score(height, weight, matches, primary_fatigue)
                     perf_score = round(min(60.0, (primary_speed / 150.0) * 60.0) + (40.0 if primary_angle > 150 else 30.0), 1)
@@ -314,7 +292,7 @@ with tab1:
                     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     cursor.execute('''
                         INSERT INTO performance_history 
-                        (player_name, sport, position, timestamp, peak_speed, technique_metric, ai_fatigue, readiness_score, performance_score)
+                        (player_name, sport, position, timestamp, peak_speed, elbow_3d_angle, ai_fatigue, readiness_score, performance_score)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (primary_player, sport, position, current_time_str, primary_speed, primary_angle, primary_fatigue, readiness, perf_score))
                     conn.commit()
@@ -324,7 +302,7 @@ with tab1:
 # ---------------------------------------------------------
 with tab2:
     st.header("📅 Day-by-Day Performance History")
-    df_filtered = pd.read_sql_query("SELECT timestamp as 'Date & Time', player_name as 'Athlete', sport as 'Sport', position as 'Position', peak_speed as 'Peak Speed (km/h)', ai_fatigue as 'AI Fatigue (1-5)', readiness_score as 'Match Readiness (%)', performance_score as 'Performance Score (100)' FROM performance_history ORDER BY timestamp DESC", conn)
+    df_filtered = pd.read_sql_query("SELECT timestamp as 'Date & Time', player_name as 'Athlete', sport as 'Sport', position as 'Position', peak_speed as 'Peak Speed (km/h)', elbow_3d_angle as '3D Arm Angle (deg)', ai_fatigue as 'AI Fatigue (1-5)', readiness_score as 'Match Readiness (%)', performance_score as 'Performance Score (100)' FROM performance_history ORDER BY timestamp DESC", conn)
     
     if not df_filtered.empty:
         df_filtered['Peak Speed (km/h)'] = df_filtered['Peak Speed (km/h)'].map('{:.1f}'.format)
@@ -350,8 +328,6 @@ with tab3:
         p_height = st.number_input("Height (cm)", min_value=120.0, max_value=230.0, value=172.0)
         p_weight = st.number_input("Weight (kg)", min_value=30.0, max_value=140.0, value=68.0)
         p_matches = st.number_input("Matches Played This Week", min_value=0, max_value=14, value=2)
-
-    st.info("ℹ️ **Fatigue Level Notice:** Manual fatigue input has been disabled. The AI Engine automatically detects fatigue during video processing.")
 
     if st.button("Save Player Profile"):
         if p_name:
