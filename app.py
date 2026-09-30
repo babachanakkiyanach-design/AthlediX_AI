@@ -5,29 +5,24 @@ import streamlit as st
 import tempfile
 import sqlite3
 import subprocess
+import requests
 import os
-import time
-from collections import defaultdict
-from inference_sdk import InferenceHTTPClient
 
 # =========================================================
-# 1. SAFE MEDIAPIPE IMPORTS
+# 1. MEDIAPIPE IMPORT
 # =========================================================
 import mediapipe as mp
 
 try:
     import mediapipe.python.solutions.pose as mp_pose
-    import mediapipe.python.solutions.drawing_utils as mp_draw
-except ImportError:
+except AttributeError:
     try:
         mp_pose = mp.solutions.pose
-        mp_draw = mp.solutions.drawing_utils
-    except AttributeError:
+    except Exception:
         mp_pose = None
-        mp_draw = None
 
 # =========================================================
-# 2. DATABASE INITIALIZATION
+# 2. DATABASE SETUP
 # =========================================================
 DB_NAME = "athletics_players.db"
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -45,84 +40,43 @@ CREATE TABLE IF NOT EXISTS players (
     matches_this_week INTEGER DEFAULT 0
 )
 ''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS performance_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_name TEXT,
-    sport TEXT,
-    position TEXT,
-    timestamp TEXT,
-    peak_speed REAL,
-    elbow_3d_angle REAL,
-    ai_fatigue INTEGER,
-    readiness_score REAL,
-    performance_score REAL
-)
-''')
 conn.commit()
 
 # =========================================================
-# 3. ROBOFLOW WORKFLOW SETUP
-# =========================================================
-WORKSPACE_NAME = "baba-chanakkiyanach"
-WORKFLOW_ID = "avs-cricket-player-and-ball-detection"
-
-@st.cache_resource
-def load_models():
-    api_key = st.secrets.get("ROBOFLOW_API_KEY", "QtbCoMHIHOWY121P7mvP")
-    
-    rf_client = InferenceHTTPClient(
-        api_url="https://serverless.roboflow.com",
-        api_key=api_key
-    )
-
-    pose_3d = None
-    if mp_pose is not None:
-        pose_3d = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            enable_segmentation=False,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-    return rf_client, pose_3d
-
-rf_client, mp_pose_engine = load_models()
-
-# =========================================================
-# 4. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS
 # =========================================================
 def calculate_3d_angle(a, b, c):
-    """Calculates 3D joint angle using X, Y, Z coordinates."""
     a = np.array([a.x, a.y, a.z])
     b = np.array([b.x, b.y, b.z])
     c = np.array([c.x, c.y, c.z])
-
     ba = a - b
     bc = c - b
-
     cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
     angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
     return int(np.degrees(angle))
 
-def process_roboflow_workflow_frame(frame):
-    """Encodes frame and queries Roboflow Serverless Workflow API."""
+def query_roboflow_api(frame, api_key, project_id, version=1):
+    """Sends a frame directly to Roboflow Inference API."""
     try:
         _, encoded_img = cv2.imencode(".jpg", frame)
         img_bytes = encoded_img.tobytes()
 
-        response = rf_client.run_workflow(
-            workspace_name=WORKSPACE_NAME,
-            workflow_id=WORKFLOW_ID,
-            images={"image": img_bytes}
+        url = f"https://detect.roboflow.com/{project_id}/{version}?api_key={api_key}"
+        response = requests.post(
+            url,
+            data=img_bytes,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
-        return response
-    except Exception:
-        return None
+        if response.status_code == 200:
+            return response.json().get("predictions", [])
+        else:
+            st.warning(f"Roboflow API returned status code {response.status_code}: {response.text}")
+            return []
+    except Exception as e:
+        st.error(f"Roboflow Connection Error: {e}")
+        return []
 
 def convert_to_h264(input_path, output_path):
-    """Converts OpenCV MP4 output to H.264 format so web browsers can stream it."""
     try:
         command = [
             'ffmpeg', '-y',
@@ -138,160 +92,116 @@ def convert_to_h264(input_path, output_path):
         return input_path
 
 # =========================================================
-# 5. STREAMLIT INTERFACE
+# 4. STREAMLIT APP UI
 # =========================================================
 st.set_page_config(page_title="AthlediX AI Engine", layout="wide", page_icon="🏆")
-st.title("🏆 AthlediX AI: Roboflow Workflow + MediaPipe Engine")
+st.title("🏆 AthlediX AI: Cricket Detection & Pose Engine")
 
-tab1, tab2, tab3 = st.tabs(["📹 Workflow Analysis", "📅 Day-by-Day History", "👤 Registered Roster"])
+# Configuration Sidebar
+st.sidebar.header("🔑 Roboflow Credentials")
+rf_api_key = st.sidebar.text_input("Roboflow API Key", value=st.secrets.get("ROBOFLOW_API_KEY", ""), type="password")
+rf_project_id = st.sidebar.text_input("Project ID", value="avs-cricket-player-and-ball-detection")
+rf_version = st.sidebar.number_input("Model Version", min_value=1, max_value=20, value=1)
+frame_skip = st.sidebar.slider("Frame Skip Optimization", min_value=1, max_value=10, value=3)
 
-cursor.execute("SELECT name FROM players")
-registered_players = [row[0] for row in cursor.fetchall()]
-
-BOWLER_COLORS = [(0, 255, 0), (255, 165, 0), (255, 0, 255), (0, 255, 255)]
+tab1, tab2 = st.tabs(["📹 Detection Analysis", "👤 Roster"])
 
 with tab1:
-    st.header("Upload Video for Roboflow Workflow Inference")
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        uploaded_video = st.file_uploader("Upload Video (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
-    with col2:
-        primary_player = st.selectbox("Athlete Profile", registered_players) if registered_players else st.text_input("Athlete Name", value="Player 1")
-        frame_skip = st.slider("Optimization (Process 1 frame every N frames)", min_value=1, max_value=10, value=5)
+    uploaded_video = st.file_uploader("Upload Video (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
 
     if uploaded_video is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
         tfile.write(uploaded_video.read())
         input_video_path = tfile.name
 
-        st.subheader("Raw Input Video")
+        st.subheader("Raw Video")
         st.video(input_video_path)
 
-        if st.button("🚀 Run Roboflow Workflow"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            cap = cv2.VideoCapture(input_video_path)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            if fps <= 0 or np.isnan(fps):
-                fps = 30
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if st.button("🚀 Process Video with Roboflow"):
+            if not rf_api_key:
+                st.error("Please enter your Roboflow API Key in the sidebar or Streamlit Secrets!")
+            else:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
-            temp_raw_video = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(temp_raw_video, fourcc, fps, (width, height))
+                cap = cv2.VideoCapture(input_video_path)
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = int(cap.get(cv2.CAP_PROP_FPS))
+                if fps <= 0 or np.isnan(fps):
+                    fps = 30
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            angle_3d = 160
-            last_workflow_output = None
-            frame_idx = 0
+                temp_raw_video = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(temp_raw_video, fourcc, fps, (width, height))
 
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
+                pose_engine = mp_pose.Pose(min_detection_confidence=0.5) if mp_pose else None
 
-                frame_idx += 1
+                frame_idx = 0
+                last_predictions = []
+                angle_3d = 0
 
-                # Process AI inference every N frames to save CPU and prevent crashes
-                if frame_idx % frame_skip == 0 or last_workflow_output is None:
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
 
-                    # 1. Query Roboflow Serverless Workflow
-                    last_workflow_output = process_roboflow_workflow_frame(frame)
+                    frame_idx += 1
 
-                    # 2. Calculate MediaPipe Pose Angle
-                    if mp_pose_engine is not None:
-                        mp_results = mp_pose_engine.process(rgb_frame)
-                        if mp_results.pose_world_landmarks:
-                            lm = mp_results.pose_world_landmarks.landmark
-                            angle_3d = calculate_3d_angle(lm[12], lm[14], lm[16])
+                    # Run inference every N frames
+                    if frame_idx % frame_skip == 0 or frame_idx == 1:
+                        last_predictions = query_roboflow_api(frame, rf_api_key, rf_project_id, rf_version)
+                        
+                        if pose_engine:
+                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            results = pose_engine.process(rgb_frame)
+                            if results.pose_world_landmarks:
+                                lm = results.pose_world_landmarks.landmark
+                                angle_3d = calculate_3d_angle(lm[12], lm[14], lm[16])
 
-                # 3. Render last known predictions onto current frame
-                if last_workflow_output and isinstance(last_workflow_output, list) and len(last_workflow_output) > 0:
-                    predictions = last_workflow_output[0].get("predictions", [])
-                    for idx, pred in enumerate(predictions):
-                        if isinstance(pred, dict):
-                            x, y = pred.get("x", 0), pred.get("y", 0)
-                            w, h = pred.get("width", 0), pred.get("height", 0)
-                            t_id = pred.get("tracker_id", pred.get("detection_id", "1"))
-                            cls_name = pred.get("class", "object")
-                            conf = pred.get("confidence", 0.0)
+                    # Draw Bounding Boxes from Roboflow
+                    for pred in last_predictions:
+                        x, y = pred.get("x", 0), pred.get("y", 0)
+                        w, h = pred.get("width", 0), pred.get("height", 0)
+                        cls_name = pred.get("class", "object")
+                        conf = pred.get("confidence", 0.0)
 
-                            x1, y1 = int(x - w / 2), int(y - h / 2)
-                            x2, y2 = int(x + w / 2), int(y + h / 2)
+                        x1, y1 = int(x - w / 2), int(y - h / 2)
+                        x2, y2 = int(x + w / 2), int(y + h / 2)
 
-                            color = BOWLER_COLORS[idx % len(BOWLER_COLORS)]
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                            cv2.putText(
-                                frame,
-                                f"ID:{t_id} {cls_name} ({conf:.2f}) | Arm: {angle_3d}deg",
-                                (x1, max(20, y1 - 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
-                            )
+                        # Color based on detection type
+                        color = (0, 255, 0) if "ball" in cls_name.lower() else (255, 165, 0)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(frame, f"{cls_name} ({conf:.2f})", (x1, max(20, y1 - 8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                # Overlay Title
-                cv2.rectangle(frame, (0, 0), (width, 40), (0, 0, 0), -1)
-                cv2.putText(frame, "AthlediX AI: Roboflow Workflow + MediaPipe 3D Engine",
-                            (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    # Draw Arm Angle Overlay
+                    if angle_3d > 0:
+                        cv2.putText(frame, f"3D Arm Angle: {angle_3d} deg", (20, 40),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-                out.write(frame)
+                    out.write(frame)
 
-                # Update progress
-                if total_frames > 0:
-                    progress_bar.progress(min(frame_idx / total_frames, 1.0))
-                    status_text.text(f"Processing frame {frame_idx} of {total_frames}...")
+                    if total_frames > 0:
+                        progress_bar.progress(min(frame_idx / total_frames, 1.0))
+                        status_text.text(f"Processing frame {frame_idx} / {total_frames}...")
 
-            cap.release()
-            out.release()
-            status_text.text("Encoding final video format...")
+                cap.release()
+                out.release()
+                status_text.text("Encoding final video format...")
 
-            # Convert output to H.264 for web playback
-            final_playable_video = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
-            convert_to_h264(temp_raw_video, final_playable_video)
+                final_video = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
+                convert_to_h264(temp_raw_video, final_video)
 
-            status_text.empty()
-            progress_bar.empty()
-            st.success("Processing complete!")
-            st.subheader("🎬 AI Processed Output Video")
-            
-            with open(final_playable_video, 'rb') as video_file:
-                st.video(video_file.read())
+                status_text.empty()
+                progress_bar.empty()
+                st.success("Processing complete!")
 
-# =========================================================
-# 6. TAB 2 & TAB 3: HISTORY & ROSTER
-# =========================================================
+                with open(final_video, 'rb') as vf:
+                    st.video(vf.read())
+
 with tab2:
-    st.header("📅 Day-by-Day Performance History")
-    df_filtered = pd.read_sql_query("SELECT timestamp as 'Date & Time', player_name as 'Athlete', sport as 'Sport', position as 'Position', peak_speed as 'Peak Speed (km/h)', elbow_3d_angle as '3D Arm Angle (deg)', ai_fatigue as 'AI Fatigue (1-5)', readiness_score as 'Match Readiness (%)', performance_score as 'Performance Score (100)' FROM performance_history ORDER BY timestamp DESC", conn)
-    st.dataframe(df_filtered, use_container_width=True)
-
-with tab3:
-    st.header("Add Player Profile")
-    col1, col2 = st.columns(2)
-    with col1:
-        p_name = st.text_input("Player Name")
-        p_sport = st.selectbox("Sport Category", ["Cricket", "Football"])
-        positions = ["Fast Bowler", "Spin Bowler", "Medium Pacer", "All-Rounder"] if p_sport == "Cricket" else ["Striker", "Midfielder", "Defender"]
-        p_position = st.selectbox("Player Position", positions)
-        p_age = st.number_input("Age", min_value=12, max_value=50, value=20)
-
-    with col2:
-        p_height = st.number_input("Height (cm)", min_value=120.0, max_value=230.0, value=172.0)
-        p_weight = st.number_input("Weight (kg)", min_value=30.0, max_value=140.0, value=68.0)
-        p_matches = st.number_input("Matches Played This Week", min_value=0, max_value=14, value=2)
-
-    if st.button("Save Player Profile"):
-        if p_name:
-            cursor.execute('''
-                INSERT OR REPLACE INTO players (name, sport, position, age, height_cm, weight_kg, matches_this_week)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (p_name, p_sport, p_position, p_age, p_height, p_weight, p_matches))
-            conn.commit()
-            st.success(f"Player '{p_name}' profile saved!")
-
-    st.subheader("Registered Player Roster")
-    df_roster = pd.read_sql_query("SELECT id, name as 'Name', sport as 'Sport', position as 'Position', age as 'Age', height_cm as 'Height (cm)', weight_kg as 'Weight (kg)', matches_this_week as 'Matches/Wk' FROM players", conn)
+    st.header("Registered Player Roster")
+    df_roster = pd.read_sql_query("SELECT id, name as 'Name', sport as 'Sport', position as 'Position' FROM players", conn)
     st.dataframe(df_roster, use_container_width=True)
