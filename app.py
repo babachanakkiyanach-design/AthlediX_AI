@@ -97,9 +97,11 @@ def convert_to_h264(input_path, output_path):
 st.set_page_config(page_title="AthlediX AI Engine", layout="wide", page_icon="🏆")
 st.title("🏆 AthlediX AI: Cricket Detection & Pose Engine")
 
-# Configuration Sidebar
+# Fetch key from secrets or sidebar
+rf_api_key_secret = st.secrets.get("ROBOFLOW_API_KEY", "")
+
 st.sidebar.header("🔑 Roboflow Credentials")
-rf_api_key = st.sidebar.text_input("Roboflow API Key", value=st.secrets.get("ROBOFLOW_API_KEY", ""), type="password")
+rf_api_key = st.sidebar.text_input("Roboflow API Key", value=rf_api_key_secret, type="password")
 rf_project_id = st.sidebar.text_input("Project ID", value="avs-cricket-player-and-ball-detection")
 rf_version = st.sidebar.number_input("Model Version", min_value=1, max_value=20, value=1)
 frame_skip = st.sidebar.slider("Frame Skip Optimization", min_value=1, max_value=10, value=3)
@@ -119,7 +121,7 @@ with tab1:
 
         if st.button("🚀 Process Video with Roboflow"):
             if not rf_api_key:
-                st.error("Please enter your Roboflow API Key in the sidebar or Streamlit Secrets!")
+                st.error("Please enter or verify your Roboflow API Key in Streamlit Secrets!")
             else:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
