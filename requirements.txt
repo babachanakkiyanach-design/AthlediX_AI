@@ -1,9 +1,8 @@
 streamlit
-ultralytics
-sahi
 opencv-python-headless
 numpy
 pandas
 mediapipe
+inference-sdk
 scipy
 lapx
