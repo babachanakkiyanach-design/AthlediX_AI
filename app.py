@@ -4,19 +4,25 @@ import pandas as pd
 import streamlit as st
 import mediapipe as mp
 
-# ==========================================
-# 1. PAGE SETUP & CONFIG
-# ==========================================
+# =========================================================
+# 1. CLOUD-SAFE MEDIAPIPE INITIALIZATION
+# =========================================================
+try:
+    mp_pose = mp.solutions.pose
+    mp_drawing = mp.solutions.drawing_utils
+except AttributeError:
+    # Direct import fallback for Linux/Streamlit Cloud runtime
+    import mediapipe.python.solutions.pose as mp_pose
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+
+# =========================================================
+# 2. PAGE CONFIGURATION
+# =========================================================
 st.set_page_config(page_title="AVS College Sports AI", layout="wide", page_icon="🏆")
 
-# Initialize MediaPipe Pose
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5)
-mp_drawing = mp.solutions.drawing_utils
-
-# ==========================================
-# 2. FULL 11-PLAYER SQUAD DATABASES (TN CONTEXT)
-# ==========================================
+# =========================================================
+# 3. FULL 11-PLAYER SQUAD DATABASES (TAMIL NADU CONTEXT)
+# =========================================================
 def generate_squad(sport, gender):
     if sport == "Cricket" and gender == "Boys":
         names = ["Ashwin", "Karthik", "Vijay", "Surya", "Dinesh", "Washington", "Natarajan", "Sandeep", "Sai", "Shahrukh", "Varun"]
@@ -40,13 +46,13 @@ def generate_squad(sport, gender):
         "Player Name": names,
         "Position": positions,
         "Baseline Speed (km/h)": speeds,
-        "Form / Readiness": np.random.randint(7, 10, 11),
-        "Matches Played": np.random.randint(12, 45, 11)
+        "Form / Readiness": [9, 8, 9, 10, 8, 9, 10, 9, 8, 9, 8],
+        "Matches Played": [24, 30, 18, 42, 15, 28, 35, 20, 19, 31, 22]
     })
 
-# ==========================================
-# 3. SIDEBAR & NAVIGATION
-# ==========================================
+# =========================================================
+# 4. SIDEBAR NAVIGATION & SELECTION
+# =========================================================
 st.sidebar.title("🏫 AVS College Sports AI")
 st.sidebar.markdown("---")
 
@@ -59,9 +65,9 @@ active_player = st.sidebar.selectbox("🎯 Select Active Player to Track:", curr
 st.sidebar.markdown("---")
 st.sidebar.info("💡 **Camera Instructions:**\nWorks on Laptop Webcams and Mobile Phone Browsers. Allow camera permissions when prompted.")
 
-# ==========================================
-# 4. MAIN DASHBOARD UI
-# ==========================================
+# =========================================================
+# 5. MAIN DASHBOARD UI
+# =========================================================
 st.title(f"🏆 AVS Engineering College - {selected_sport} ({selected_team})")
 
 tab_squad, tab_vision = st.tabs(["📋 Full 11-Player Squad Roster", "🎥 Live Camera AI Performance Analysis"])
@@ -90,7 +96,6 @@ with tab_vision:
     col_cam, col_stats = st.columns([2, 1])
 
     with col_cam:
-        # Browser-native camera input (Works on Laptop + Mobile)
         camera_file = st.camera_input("Capture Player Action Frame")
 
     with col_stats:
@@ -99,57 +104,59 @@ with tab_vision:
         live_verdict = st.empty()
 
     if camera_file is not None:
-        # Convert captured image bytes to OpenCV format
         bytes_data = camera_file.getvalue()
         cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-        
-        # RGB Conversion for MediaPipe
         rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
         h, w, _ = cv2_img.shape
-        results = pose.process(rgb_img)
 
-        verdict = "Player Detected - Position Normal"
-        action_type = "Idle / Stance"
+        try:
+            with mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5) as pose:
+                results = pose.process(rgb_img)
 
-        if results.pose_landmarks:
-            mp_drawing.draw_landmarks(cv2_img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-            landmarks = results.pose_landmarks.landmark
+                verdict = "Player Detected - Position Normal"
+                action_type = "Idle / Stance"
 
-            if selected_sport == "Cricket":
-                # Check Wrist relative to Shoulder
-                right_wrist_y = landmarks[16].y
-                right_shoulder_y = landmarks[12].y
-                
-                if right_wrist_y < right_shoulder_y:
-                    action_type = "HIGH ARM BOWLING ACTION DETECTED"
-                    player_data = current_squad_df[current_squad_df["Player Name"] == active_player].iloc[0]
+                if results.pose_landmarks:
+                    mp_drawing.draw_landmarks(cv2_img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                    landmarks = results.pose_landmarks.landmark
+
+                    if selected_sport == "Cricket":
+                        # Compare Right Wrist relative to Shoulder
+                        right_wrist_y = landmarks[16].y
+                        right_shoulder_y = landmarks[12].y
+                        
+                        if right_wrist_y < right_shoulder_y:
+                            action_type = "HIGH ARM BOWLING ACTION DETECTED"
+                            player_data = current_squad_df[current_squad_df["Player Name"] == active_player].iloc[0]
+                            
+                            if "Fast" in player_data["Position"] or player_data["Baseline Speed (km/h)"] > 120:
+                                verdict = f"🔥 EXCELLENT FAST BOWL DELIVERY! ({player_data['Baseline Speed (km/h)']} km/h)"
+                            else:
+                                verdict = f"🌀 SPIN / MEDIUM CONTROLLED DELIVERY ({player_data['Baseline Speed (km/h)']} km/h)"
                     
-                    if "Fast" in player_data["Position"] or player_data["Baseline Speed (km/h)"] > 120:
-                        verdict = f"🔥 EXCELLENT FAST BOWL DELIVERY! ({player_data['Baseline Speed (km/h)']} km/h)"
-                    else:
-                        verdict = f"🌀 SPIN / MEDIUM CONTROLLED DELIVERY ({player_data['Baseline Speed (km/h)']} km/h)"
-            
-            elif selected_sport == "Football":
-                right_ankle_x = landmarks[28].x
-                left_ankle_x = landmarks[27].x
-                
-                if abs(right_ankle_x - left_ankle_x) > 0.15:
-                    action_type = "POWER KICK / SPRINT EXTENSION DETECTED"
-                    player_data = current_squad_df[current_squad_df["Player Name"] == active_player].iloc[0]
-                    verdict = f"⚡ HIGH-SPEED SPRINT / STRIKE! Top speed: {player_data['Baseline Speed (km/h)']} km/h"
+                    elif selected_sport == "Football":
+                        right_ankle_x = landmarks[28].x
+                        left_ankle_x = landmarks[27].x
+                        
+                        if abs(right_ankle_x - left_ankle_x) > 0.15:
+                            action_type = "POWER KICK / SPRINT EXTENSION DETECTED"
+                            player_data = current_squad_df[current_squad_df["Player Name"] == active_player].iloc[0]
+                            verdict = f"⚡ HIGH-SPEED SPRINT / STRIKE! Top speed: {player_data['Baseline Speed (km/h)']} km/h"
 
-            # Draw overlay on image
-            cv2.rectangle(cv2_img, (10, 10), (w - 10, 60), (0, 0, 0), -1)
-            cv2.putText(cv2_img, f"Tracking: {active_player} ({selected_sport})", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    # Draw text overlay on image
+                    cv2.rectangle(cv2_img, (10, 10), (w - 10, 60), (0, 0, 0), -1)
+                    cv2.putText(cv2_img, f"Tracking: {active_player} ({selected_sport})", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            with col_cam:
-                st.image(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB), caption="AI Keypoint & Pose Mapping", use_container_width=True)
+                    with col_cam:
+                        st.image(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB), caption="AI Keypoint & Pose Mapping", use_container_width=True)
 
-            with col_stats:
-                live_action.info(f"**Detected Motion:** {action_type}")
-                if "EXCELLENT" in verdict or "HIGH-SPEED" in verdict:
-                    live_verdict.success(f"**AI Verdict:**\n\n{verdict}")
+                    with col_stats:
+                        live_action.info(f"**Detected Motion:** {action_type}")
+                        if "EXCELLENT" in verdict or "HIGH-SPEED" in verdict:
+                            live_verdict.success(f"**AI Verdict:**\n\n{verdict}")
+                        else:
+                            live_verdict.warning(f"**AI Verdict:**\n\n{verdict}")
                 else:
-                    live_verdict.warning(f"**AI Verdict:**\n\n{verdict}")
-        else:
-            st.warning("No player pose detected in frame. Please ensure the full body/arm is visible to the camera.")
+                    st.warning("No player pose detected in frame. Ensure full body/arm is visible.")
+        except Exception as e:
+            st.error(f"AI Detection processing error: {e}")
