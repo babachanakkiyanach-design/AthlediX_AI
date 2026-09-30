@@ -1,5 +1,6 @@
 streamlit
 ultralytics
+sahi
 opencv-python-headless
 numpy
 pandas
