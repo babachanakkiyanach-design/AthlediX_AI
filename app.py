@@ -9,6 +9,14 @@ from collections import deque, defaultdict
 from datetime import datetime
 from ultralytics import YOLO
 
+# SAHI Imports for Sliced Hyper Inference
+from sahi import AutoDetectionModel
+from sahi.predict import get_sliced_prediction
+
+# Updated MediaPipe Imports for Cloud Compatibility
+from mediapipe.python.solutions import pose as mp_pose
+from mediapipe.python.solutions import drawing_utils as mp_draw
+
 # =========================================================
 # 1. DATABASE SETUP
 # =========================================================
@@ -46,12 +54,22 @@ CREATE TABLE IF NOT EXISTS performance_history (
 conn.commit()
 
 # =========================================================
-# 2. LOAD ENSEMBLE MODELS (YOLOV8 + GOOGLE MEDIAPIPE)
+# 2. LOAD ENSEMBLE MODELS (YOLO11 + SAHI + GOOGLE MEDIAPIPE)
 # =========================================================
 @st.cache_resource
 def load_models():
-    yolo_model = YOLO("yolov8n-pose.pt")
-    mp_pose = mp.solutions.pose
+    # Load YOLO11 Pose Model
+    yolo11_model = YOLO("yolo11n-pose.pt")
+    
+    # Initialize SAHI Detection Model wrapper around YOLO11
+    sahi_model = AutoDetectionModel.from_pretrained(
+        model_type="ultralytics",
+        model_path="yolo11n-pose.pt",
+        confidence_threshold=0.3,
+        device="cpu"
+    )
+
+    # Initialize Google MediaPipe 3D Pose
     pose_3d = mp_pose.Pose(
         static_image_mode=False,
         model_complexity=2,
@@ -59,9 +77,9 @@ def load_models():
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     )
-    return yolo_model, pose_3d, mp_pose
+    return yolo11_model, sahi_model, pose_3d, mp_draw
 
-model, mp_pose_engine, mp_draw = load_models()
+yolo11_model, sahi_model, mp_pose_engine, mp_draw = load_models()
 
 # =========================================================
 # 3. HELPER & 3D BIOMECHANICS FUNCTIONS
@@ -111,10 +129,10 @@ def calculate_readiness_score(height_cm, weight_kg, matches_this_week, ai_fatigu
 # =========================================================
 st.set_page_config(page_title="AthlediX AI Engine", layout="wide", page_icon="🏆")
 
-st.title("🏆 AthlediX AI: Hybrid Motion Engine")
-st.markdown("Powered by **Ultralytics YOLOv8** + **Google MediaPipe 3D Kinematics**.")
+st.title("🏆 AthlediX AI: YOLO11 + SAHI Sliced Inference Engine")
+st.markdown("Powered by **YOLO11 Pose** + **SAHI (Sliced Hyper Inference)** + **MediaPipe 3D Kinematics**.")
 
-tab1, tab2, tab3 = st.tabs(["📹 AI Motion Analysis", "📅 Day-by-Day History", "👤 Registered Roster"])
+tab1, tab2, tab3 = st.tabs(["📹 SAHI Motion Analysis", "📅 Day-by-Day History", "👤 Registered Roster"])
 
 cursor.execute("SELECT name FROM players")
 registered_players = [row[0] for row in cursor.fetchall()]
@@ -122,10 +140,10 @@ registered_players = [row[0] for row in cursor.fetchall()]
 BOWLER_COLORS = [(0, 255, 0), (255, 165, 0), (255, 0, 255), (0, 255, 255)]
 
 # ---------------------------------------------------------
-# TAB 1: MOTION ANALYSIS
+# TAB 1: SAHI & YOLO11 MOTION ANALYSIS
 # ---------------------------------------------------------
 with tab1:
-    st.header("Upload Video for Performance Analysis")
+    st.header("Upload Video for SAHI + YOLO11 Sliced Analysis")
     
     col_u1, col_u2 = st.columns([2, 1])
     with col_u1:
@@ -135,6 +153,8 @@ with tab1:
             primary_player = st.selectbox("Primary Tagged Athlete", registered_players)
         else:
             primary_player = st.text_input("Primary Athlete Name", value="Guest Bowler")
+            
+        use_sahi_slicing = st.checkbox("Enable SAHI Sliced Slicing (For Distant Bowlers)", value=False)
 
     if uploaded_video is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
@@ -144,8 +164,8 @@ with tab1:
         st.subheader("Raw Video Input")
         st.video(input_video_path)
 
-        if st.button("🚀 Run Dual-Engine AI Pipeline"):
-            with st.spinner("Processing 3D kinematics and motion tracking..."):
+        if st.button("🚀 Run YOLO11 + SAHI Dual Pipeline"):
+            with st.spinner("Processing sliced inference and 3D pose kinematics..."):
                 cap = cv2.VideoCapture(input_video_path)
                 
                 fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -171,20 +191,31 @@ with tab1:
                     curr_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                    # ENGINE 1: Safe YOLO Execution with Fallback
+                    # ENGINE 1: SAHI Sliced Inference or Direct YOLO11
+                    if use_sahi_slicing:
+                        sahi_results = get_sliced_prediction(
+                            frame,
+                            sahi_model,
+                            slice_height=256,
+                            slice_width=256,
+                            overlap_height_ratio=0.2,
+                            overlap_width_ratio=0.2,
+                            verbose=0
+                        )
+
                     try:
-                        yolo_results = model.track(frame, persist=True, verbose=False)
+                        yolo11_results = yolo11_model.track(frame, persist=True, verbose=False)
                     except Exception:
-                        yolo_results = model(frame, verbose=False)
+                        yolo11_results = yolo11_model(frame, verbose=False)
 
                     # ENGINE 2: MediaPipe 3D Landmark Extraction
                     mp_results = mp_pose_engine.process(rgb_frame)
 
-                    if yolo_results and len(yolo_results[0].keypoints) > 0:
-                        boxes = yolo_results[0].boxes
+                    if yolo11_results and len(yolo11_results[0].keypoints) > 0:
+                        boxes = yolo11_results[0].boxes
                         has_ids = hasattr(boxes, 'id') and boxes.id is not None
                         track_ids = boxes.id.cpu().numpy().astype(int) if has_ids else list(range(1, len(boxes) + 1))
-                        keypoints_data = yolo_results[0].keypoints.data.cpu().numpy()
+                        keypoints_data = yolo11_results[0].keypoints.data.cpu().numpy()
 
                         for idx, track_id in enumerate(track_ids):
                             kpts = keypoints_data[idx]
@@ -222,12 +253,13 @@ with tab1:
 
                                 color = BOWLER_COLORS[(track_id - 1) % len(BOWLER_COLORS)]
                                 cv2.circle(frame, (wx, wy), 7, color, -1)
-                                cv2.putText(frame, f"Bowler #{track_id}: {curr_speed:.1f} km/h | 3D Arm: {angle_3d} deg",
+                                label_mode = "SAHI + YOLO11" if use_sahi_slicing else "YOLO11"
+                                cv2.putText(frame, f"[{label_mode}] Bowler #{track_id}: {curr_speed:.1f} km/h | 3D Arm: {angle_3d} deg",
                                             (wx - 20, max(20, wy - 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
                     cv2.rectangle(frame, (0, 0), (width, 40), (0, 0, 0), -1)
-                    cv2.putText(frame, "AthlediX AI Engine: YOLOv8 Pose + Google MediaPipe 3D",
-                                (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.putText(frame, "AthlediX AI: YOLO11 Pose + SAHI Sliced Engine + MediaPipe 3D",
+                                (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
                     out.write(frame)
 
