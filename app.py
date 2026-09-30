@@ -5,17 +5,11 @@ import streamlit as st
 import tempfile
 import os
 import sqlite3
+from datetime import datetime
 from ultralytics import YOLO
 
-# Optional: Graceful fallback if face_recognition library is not installed
-try:
-    import face_recognition
-    FACE_REC_AVAILABLE = True
-except ImportError:
-    FACE_REC_AVAILABLE = False
-
 # =========================================================
-# 1. DATABASE SETUP (SQLite for College/Athletics Roster)
+# 1. DATABASE SETUP
 # =========================================================
 DB_NAME = "athletics_players.db"
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -26,29 +20,45 @@ CREATE TABLE IF NOT EXISTS players (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE,
     sport TEXT,
+    position TEXT,
     age INTEGER,
     height_cm REAL,
     weight_kg REAL,
+    matches_this_week INTEGER DEFAULT 0,
+    fatigue_level INTEGER DEFAULT 1,
     photo_path TEXT
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS performance_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_name TEXT,
+    sport TEXT,
+    position TEXT,
+    timestamp TEXT,
+    peak_speed REAL,
+    technique_metric REAL,
+    readiness_score REAL,
+    performance_score REAL
 )
 ''')
 conn.commit()
 
 # =========================================================
-# 2. LOAD ULTRALYTICS YOLOV8 POSE MODEL
+# 2. LOAD YOLOV8 MODEL
 # =========================================================
 @st.cache_resource
-def load_ultralytics_model():
-    # Downloads & caches Ultralytics YOLOv8 Nano Pose model
+def load_yolo_model():
     return YOLO("yolov8n-pose.pt")
 
-model = load_ultralytics_model()
+model = load_yolo_model()
 
 # =========================================================
-# 3. HELPER FUNCTIONS (Angle, Speed, Face ID)
+# 3. HELPER FUNCTIONS
 # =========================================================
 def calculate_angle(a, b, c):
-    """Calculates elbow joint angle (degrees) using shoulder, elbow, and wrist."""
+    """Calculates joint angle in degrees."""
     a, b, c = np.array(a), np.array(b), np.array(c)
     radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
     angle = np.abs(radians * 180.0 / np.pi)
@@ -56,61 +66,47 @@ def calculate_angle(a, b, c):
         angle = 360.0 - angle
     return int(angle)
 
-def get_known_faces():
-    """Loads player face encodings from stored database photos."""
-    if not FACE_REC_AVAILABLE:
-        return {}
+def calculate_readiness_score(height_cm, weight_kg, matches_this_week, fatigue_level):
+    """Calculates Match Readiness Score (0% - 100%)."""
+    base_readiness = 100.0
+    workload_deduction = matches_this_week * 7.5
+    fatigue_deduction = (fatigue_level - 1) * 10.0
     
-    cursor.execute("SELECT name, photo_path FROM players")
-    rows = cursor.fetchall()
-    known = {}
-    for name, photo_path in rows:
-        if photo_path and os.path.exists(photo_path):
-            try:
-                img = face_recognition.load_image_file(photo_path)
-                encodings = face_recognition.face_encodings(img)
-                if len(encodings) > 0:
-                    known[name] = {'encoding': encodings[0]}
-            except Exception:
-                continue
-    return known
+    height_m = height_cm / 100.0
+    bmi = weight_kg / (height_m ** 2) if height_m > 0 else 22.0
+    bmi_penalty = 5.0 if (bmi < 18.5 or bmi > 25.0) else 0.0
 
-def identify_player(frame, known_players):
-    """Matches face in current video frame to registered player database."""
-    if not FACE_REC_AVAILABLE or not known_players:
-        return "Unknown Player"
-        
-    try:
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_frame)
-        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-
-        for face_encoding in face_encodings:
-            for name, data in known_players.items():
-                matches = face_recognition.compare_faces([data['encoding']], face_encoding, tolerance=0.6)
-                if True in matches:
-                    return name
-    except Exception:
-        pass
-        
-    return "Unknown Player"
+    readiness = base_readiness - workload_deduction - fatigue_deduction - bmi_penalty
+    return max(0.0, min(100.0, round(readiness, 1)))
 
 # =========================================================
-# 4. STREAMLIT WEB INTERFACE
+# 4. STREAMLIT APP UI
 # =========================================================
-st.set_page_config(page_title="Athletics & Sports AI Hub", layout="wide", page_icon="🏃")
+st.set_page_config(page_title="AthlediX AI Engine", layout="wide", page_icon="🏆")
 
-st.title("🏃 Athletics & Sports AI Analytics System")
-st.markdown("Powered by **Ultralytics YOLOv8-Pose**. Manage player databases, identify athletes, and measure bowling/sports speed.")
+st.title("🏆 AthlediX AI: Performance & Readiness Engine")
+st.markdown("YOLOv8 Pose Motion Tracking, Bowling Speed Analysis & Player Readiness Leaderboards.")
 
-tab1, tab2, tab3 = st.tabs(["📹 Video Analysis", "👤 Player Registration", "📊 Database Roster"])
+tab1, tab2, tab3 = st.tabs(["📹 Video Analysis & Best Performer", "📅 Day-by-Day History", "👤 Player & Readiness Roster"])
+
+# Fetch player names for selection dropdowns
+cursor.execute("SELECT name FROM players")
+registered_players = [row[0] for row in cursor.fetchall()]
 
 # ---------------------------------------------------------
-# TAB 1: VIDEO ANALYSIS & AI SPEED TRACKING
+# TAB 1: VIDEO ANALYSIS
 # ---------------------------------------------------------
 with tab1:
-    st.header("Upload Footage for Automated Analytics")
-    uploaded_video = st.file_uploader("Upload Player Video (Recommended: 60 FPS)", type=["mp4", "mov", "avi"])
+    st.header("Upload Player Performance Video")
+    
+    col_u1, col_u2 = st.columns([2, 1])
+    with col_u1:
+        uploaded_video = st.file_uploader("Upload Bowling / Athletic Video (MP4 / MOV)", type=["mp4", "mov", "avi"])
+    with col_u2:
+        if registered_players:
+            selected_player = st.selectbox("Select Athlete in Video", registered_players)
+        else:
+            selected_player = st.text_input("Enter Athlete Name", value="Guest Player")
 
     if uploaded_video is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
@@ -119,56 +115,42 @@ with tab1:
 
         st.video(video_path)
 
-        if st.button("🚀 Run AI Analysis"):
-            with st.spinner("Analyzing motion with Ultralytics YOLOv8..."):
-                known_players = get_known_faces()
+        if st.button("🚀 Analyze Motion & Record Performance"):
+            with st.spinner("Analyzing motion keypoints with Ultralytics YOLOv8..."):
                 cap = cv2.VideoCapture(video_path)
                 
-                detected_name = "Unknown Player"
                 speeds = []
                 angles = []
                 prev_wrist = None
                 prev_time = None
-                frame_count = 0
 
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret:
                         break
 
-                    frame_count += 1
                     curr_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
-                    # Auto Face Detection on initial frames
-                    if detected_name == "Unknown Player" and frame_count <= 20:
-                        detected_name = identify_player(frame, known_players)
-
-                    # Pose Tracking via Ultralytics YOLOv8
                     results = model(frame, verbose=False)
                     if results and len(results[0].keypoints) > 0:
                         kpts = results[0].keypoints.data.cpu().numpy()[0]
 
-                        # COCO Keypoints: 6=Right Shoulder, 8=Right Elbow, 10=Right Wrist
                         if len(kpts) >= 11:
-                            r_shoulder = kpts[6][:2]
-                            r_elbow = kpts[8][:2]
-                            r_wrist = kpts[10][:2]
+                            r_shoulder, r_elbow, r_wrist = kpts[6][:2], kpts[8][:2], kpts[10][:2]
 
-                            # Calculate Elbow Joint Angle
                             if kpts[6][2] > 0.35 and kpts[8][2] > 0.35 and kpts[10][2] > 0.35:
                                 angle = calculate_angle(r_shoulder, r_elbow, r_wrist)
                                 angles.append(angle)
 
-                            # Calculate Release Velocity (Distance over Delta Time)
                             if kpts[10][2] > 0.35:
                                 if prev_wrist is not None and prev_time is not None:
                                     dt = curr_time - prev_time
                                     if dt > 0.005:
                                         dist_px = np.sqrt((r_wrist[0] - prev_wrist[0])**2 + (r_wrist[1] - prev_wrist[1])**2)
-                                        meters_per_px = 1.7 / 380.0  # Height scale calibration factor
+                                        meters_per_px = 1.7 / 380.0
                                         speed_kmh = (dist_px * meters_per_px / dt) * 3.6
 
-                                        if 15.0 < speed_kmh < 160.0:
+                                        if 12.0 < speed_kmh < 160.0:
                                             speeds.append(speed_kmh)
 
                                 prev_wrist = r_wrist
@@ -176,75 +158,97 @@ with tab1:
 
                 cap.release()
 
-                # Display Results & Database Match
-                st.subheader("🎯 Analysis Summary")
-
-                cursor.execute("SELECT sport, age, height_cm, weight_kg FROM players WHERE name = ?", (detected_name,))
+                # Get Player Profile Info
+                cursor.execute("SELECT sport, position, height_cm, weight_kg, matches_this_week, fatigue_level FROM players WHERE name = ?", (selected_player,))
                 player_profile = cursor.fetchone()
 
                 if player_profile:
-                    sport, age, height, weight = player_profile
-                    st.success(f"**Identified Player:** {detected_name}")
-                    
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Sport", sport)
-                    c2.metric("Age", f"{age} yrs")
-                    c3.metric("Height", f"{height} cm")
-                    c4.metric("Weight", f"{weight} kg")
+                    sport, position, height, weight, matches, fatigue = player_profile
+                    readiness = calculate_readiness_score(height, weight, matches, fatigue)
                 else:
-                    st.info(f"**Player Identified:** {detected_name} (Not found in Database Profile)")
+                    sport, position, readiness = "General", "Athlete", 85.0
 
                 top_speed = round(max(speeds), 1) if speeds else 0.0
                 avg_angle = round(np.mean(angles), 1) if angles else 0.0
-                score = round(min(60.0, (top_speed / 140.0) * 60.0) + (40.0 if avg_angle > 150 else (avg_angle/150.0)*40.0), 1)
+                
+                speed_score = min(60.0, (top_speed / 140.0) * 60.0)
+                tech_score = 40.0 if avg_angle > 150 else (avg_angle / 150.0) * 40.0
+                total_perf_score = round(speed_score + tech_score, 1)
 
-                m1, m2, m3 = st.columns(3)
-                m1.metric("⚡ Peak Release Speed", f"{top_speed} km/h")
-                m2.metric("📐 Avg Arm Extension Angle", f"{avg_angle}°")
-                m3.metric("⭐ Overall Performance Rating", f"{score} / 100")
+                current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute('''
+                    INSERT INTO performance_history 
+                    (player_name, sport, position, timestamp, peak_speed, technique_metric, readiness_score, performance_score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (selected_player, sport, position, current_time_str, top_speed, avg_angle, readiness, total_perf_score))
+                conn.commit()
+
+                st.subheader("🎯 Session Results")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("👤 Athlete", selected_player)
+                m2.metric("⚽ Sport / Role", f"{sport} ({position})")
+                m3.metric("⚡ Peak Speed", f"{top_speed} km/h")
+                m4.metric("💚 Match Readiness", f"{readiness}%")
+                m5.metric("⭐ Performance Rating", f"{total_perf_score} / 100")
+
+                st.success(f"Performance logged on {current_time_str}!")
+
+    st.markdown("---")
+    st.header("🌟 Best Performer Evaluation")
+    df_history = pd.read_sql_query("SELECT * FROM performance_history ORDER BY performance_score DESC", conn)
+    
+    if not df_history.empty:
+        best = df_history.iloc[0]
+        st.info(f"🏆 **Top Best Performer:** **{best['player_name']}** ({best['sport']} - {best['position']}) with a Performance Score of **{best['performance_score']}/100**, Speed of **{best['peak_speed']} km/h**, and Match Readiness of **{best['readiness_score']}%**!")
 
 # ---------------------------------------------------------
-# TAB 2: REGISTER NEW PLAYER
+# TAB 2: DAY-BY-DAY HISTORY
 # ---------------------------------------------------------
 with tab2:
-    st.header("Add Player to Athletics Database")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        p_name = st.text_input("Player Full Name (e.g., Sweety / Priya)")
-        p_sport = st.selectbox("Sport Category", ["Cricket", "Football", "Athletics", "Other"])
-        p_age = st.number_input("Age", min_value=10, max_value=60, value=20)
-
-    with col2:
-        p_height = st.number_input("Height (cm)", min_value=100.0, max_value=230.0, value=170.0)
-        p_weight = st.number_input("Weight (kg)", min_value=30.0, max_value=150.0, value=65.0)
-        p_photo = st.file_uploader("Upload Clear Face Photo", type=["jpg", "jpeg", "png"])
-
-    if st.button("Save Player to Database"):
-        if p_name and p_photo:
-            os.makedirs("player_photos", exist_ok=True)
-            photo_path = os.path.join("player_photos", f"{p_name.lower().replace(' ', '_')}.jpg")
-
-            with open(photo_path, "wb") as f:
-                f.write(p_photo.getbuffer())
-
-            try:
-                cursor.execute(
-                    "INSERT INTO players (name, sport, age, height_cm, weight_kg, photo_path) VALUES (?, ?, ?, ?, ?, ?)",
-                    (p_name, p_sport, p_age, p_height, p_weight, photo_path)
-                )
-                conn.commit()
-                st.success(f"Player '{p_name}' successfully added to database!")
-            except sqlite3.IntegrityError:
-                st.error("A player with this name already exists in the database.")
-        else:
-            st.warning("Please fill in player name and upload a face photo.")
+    st.header("📅 Day-by-Day Performance History")
+    df_filtered = pd.read_sql_query("SELECT timestamp as 'Date & Time', player_name as 'Athlete', sport as 'Sport', position as 'Position', peak_speed as 'Peak Speed (km/h)', readiness_score as 'Match Readiness (%)', performance_score as 'Performance Score (100)' FROM performance_history ORDER BY timestamp DESC", conn)
+    st.dataframe(df_filtered, use_container_width=True)
 
 # ---------------------------------------------------------
-# TAB 3: ROSTER LEADERBOARD & DATABASE VIEW
+# TAB 3: REGISTER PLAYER
 # ---------------------------------------------------------
 with tab3:
-    st.header("Registered Athletics Database Roster")
-    df_players = pd.read_sql_query("SELECT id, name, sport, age, height_cm, weight_kg FROM players", conn)
-    st.dataframe(df_players, use_container_width=True)
-    
+    st.header("Add Player Profile & Calculate Readiness")
+    col1, col2 = st.columns(2)
+    with col1:
+        p_name = st.text_input("Player Name (e.g., Sweety / Priya)")
+        p_sport = st.selectbox("Sport Category", ["Cricket", "Football"])
+        positions = ["Fast Bowler", "Spin Bowler", "All-Rounder", "Batsman", "Wicketkeeper"] if p_sport == "Cricket" else ["Striker / Forward", "Midfielder", "Defender", "Goalkeeper"]
+        p_position = st.selectbox("Player Position", positions)
+        p_age = st.number_input("Age", min_value=12, max_value=50, value=20)
+        p_height = st.number_input("Height (cm)", min_value=120.0, max_value=230.0, value=172.0)
+
+    with col2:
+        p_weight = st.number_input("Weight (kg)", min_value=30.0, max_value=140.0, value=68.0)
+        p_matches = st.number_input("Matches Played This Week", min_value=0, max_value=14, value=2)
+        p_fatigue = st.slider("Fatigue Level (1 = Fresh, 5 = Exhausted)", 1, 5, 2)
+
+    calculated_readiness = calculate_readiness_score(p_height, p_weight, p_matches, p_fatigue)
+    st.info(f"💡 Calculated Initial Match Readiness: **{calculated_readiness}%**")
+
+    if st.button("Save Player Profile"):
+        if p_name:
+            try:
+                cursor.execute('''
+                    INSERT INTO players (name, sport, position, age, height_cm, weight_kg, matches_this_week, fatigue_level)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (p_name, p_sport, p_position, p_age, p_height, p_weight, p_matches, p_fatigue))
+                conn.commit()
+                st.success(f"Player '{p_name}' successfully added!")
+            except sqlite3.IntegrityError:
+                cursor.execute('''
+                    UPDATE players SET sport=?, position=?, age=?, height_cm=?, weight_kg=?, matches_this_week=?, fatigue_level=?
+                    WHERE name=?
+                ''', (p_sport, p_position, p_age, p_height, p_weight, p_matches, p_fatigue, p_name))
+                conn.commit()
+                st.success(f"Player '{p_name}' profile updated!")
+
+    st.markdown("---")
+    st.subheader("Registered Player Roster")
+    df_roster = pd.read_sql_query("SELECT id, name as 'Name', sport as 'Sport', position as 'Position', age as 'Age', height_cm as 'Height (cm)', weight_kg as 'Weight (kg)', matches_this_week as 'Matches/Wk', fatigue_level as 'Fatigue' FROM players", conn)
+    st.dataframe(df_roster, use_container_width=True)
