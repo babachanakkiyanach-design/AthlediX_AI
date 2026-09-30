@@ -1,5 +1,6 @@
 streamlit
+ultralytics
 opencv-python-headless
-mediapipe
 pandas
 numpy
+face_recognition
