@@ -2,7 +2,6 @@ streamlit
 opencv-python-headless
 numpy
 pandas
-mediapipe==0.10.14
+mediapipe
 inference-sdk
 scipy
-lapx
