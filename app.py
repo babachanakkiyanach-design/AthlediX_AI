@@ -4,21 +4,27 @@ import pandas as pd
 import streamlit as st
 import tempfile
 import sqlite3
-import mediapipe as mp
 from collections import defaultdict
-from datetime import datetime
 from inference_sdk import InferenceHTTPClient
 
-# Safe MediaPipe Import
+# =========================================================
+# 1. SAFE MEDIAPIPE IMPORTS (Fixes ModuleNotFoundError)
+# =========================================================
+import mediapipe as mp
+
 try:
-    mp_pose = mp.solutions.pose
-    mp_draw = mp.solutions.drawing_utils
-except AttributeError:
-    from mediapipe.python.solutions import pose as mp_pose
-    from mediapipe.python.solutions import drawing_utils as mp_draw
+    import mediapipe.python.solutions.pose as mp_pose
+    import mediapipe.python.solutions.drawing_utils as mp_draw
+except ImportError:
+    try:
+        mp_pose = mp.solutions.pose
+        mp_draw = mp.solutions.drawing_utils
+    except AttributeError:
+        mp_pose = None
+        mp_draw = None
 
 # =========================================================
-# 1. DATABASE SETUP
+# 2. DATABASE INITIALIZATION
 # =========================================================
 DB_NAME = "athletics_players.db"
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -54,32 +60,36 @@ CREATE TABLE IF NOT EXISTS performance_history (
 conn.commit()
 
 # =========================================================
-# 2. ROBOFLOW API & MEDIAPIPE INITIALIZATION
+# 3. ROBOFLOW WORKFLOW & MEDIAPIPE SETUP
 # =========================================================
-# Set your Roboflow Workspace Model ID / Workflow ID here
-ROBOFLOW_MODEL_ID = "your-model-id/1"  # e.g., "cricket-bowler-tracking/1"
+WORKSPACE_NAME = "baba-chanakkiyanach"
+WORKFLOW_ID = "avs-cricket-player-and-ball-detection"
 
 @st.cache_resource
 def load_models():
-    api_key = st.secrets.get("ROBOFLOW_API_KEY", "YOUR_ROBOFLOW_API_KEY")
+    # Load Roboflow API key from secrets or fallback to key
+    api_key = st.secrets.get("ROBOFLOW_API_KEY", "QtbCoMHIHOWY121P7mvP")
+    
     rf_client = InferenceHTTPClient(
-        api_url="https://detect.roboflow.com",
+        api_url="https://serverless.roboflow.com",
         api_key=api_key
     )
 
-    pose_3d = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=2,
-        enable_segmentation=False,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
+    pose_3d = None
+    if mp_pose is not None:
+        pose_3d = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=2,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
     return rf_client, pose_3d
 
 rf_client, mp_pose_engine = load_models()
 
 # =========================================================
-# 3. HELPER & BIOMECHANICS FUNCTIONS
+# 4. HELPER FUNCTIONS
 # =========================================================
 def calculate_3d_angle(a, b, c):
     """Calculates 3D joint angle using X, Y, Z coordinates."""
@@ -94,75 +104,43 @@ def calculate_3d_angle(a, b, c):
     angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
     return int(np.degrees(angle))
 
-def parse_roboflow_json(rf_response):
-    """
-    Parses Roboflow JSON prediction response (works with standard API & Workflows).
-    Extracts bounding boxes, labels, confidence, and tracker IDs.
-    """
-    parsed_detections = []
-    
-    # Handle response structure differences between standard inference & Workflows
-    predictions = rf_response.get("predictions", []) if isinstance(rf_response, dict) else []
-    
-    if not predictions and isinstance(rf_response, list):
-        predictions = rf_response
+def process_roboflow_workflow_frame(frame):
+    """Encodes frame and queries Roboflow Workflow API."""
+    try:
+        # Encode frame to JPG memory buffer for workflow API transmission
+        _, encoded_img = cv2.imencode(".jpg", frame)
+        img_bytes = encoded_img.tobytes()
 
-    for pred in predictions:
-        if isinstance(pred, dict):
-            x = pred.get("x", 0)
-            y = pred.get("y", 0)
-            w = pred.get("width", 0)
-            h = pred.get("height", 0)
-            tracker_id = pred.get("tracker_id", pred.get("detection_id", "1"))
-            cls_name = pred.get("class", "person")
-            confidence = pred.get("confidence", 0.0)
-
-            # Convert center (x, y, w, h) to top-left and bottom-right corners
-            x1 = int(x - w / 2)
-            y1 = int(y - h / 2)
-            x2 = int(x + w / 2)
-            y2 = int(y + h / 2)
-
-            parsed_detections.append({
-                "tracker_id": tracker_id,
-                "class": cls_name,
-                "confidence": confidence,
-                "bbox": (x1, y1, x2, y2)
-            })
-
-    return parsed_detections
+        response = rf_client.run_workflow(
+            workspace_name=WORKSPACE_NAME,
+            workflow_id=WORKFLOW_ID,
+            images={"image": img_bytes}
+        )
+        return response
+    except Exception as e:
+        return None
 
 # =========================================================
-# 4. STREAMLIT APP UI
+# 5. STREAMLIT INTERFACE
 # =========================================================
 st.set_page_config(page_title="AthlediX AI Engine", layout="wide", page_icon="🏆")
+st.title("🏆 AthlediX AI: Roboflow Workflow + MediaPipe Kinematics")
 
-st.title("🏆 AthlediX AI: Roboflow API + MediaPipe 3D Kinematics")
-st.markdown("Powered by **Roboflow Workflow JSON API** + **Google MediaPipe 3D Pose**.")
-
-tab1, tab2, tab3 = st.tabs(["📹 Roboflow API Analysis", "📅 Day-by-Day History", "👤 Registered Roster"])
+tab1, tab2, tab3 = st.tabs(["📹 Workflow Analysis", "📅 Day-by-Day History", "👤 Registered Roster"])
 
 cursor.execute("SELECT name FROM players")
 registered_players = [row[0] for row in cursor.fetchall()]
 
 BOWLER_COLORS = [(0, 255, 0), (255, 165, 0), (255, 0, 255), (0, 255, 255)]
 
-# ---------------------------------------------------------
-# TAB 1: ROBOFLOW API MOTION ANALYSIS
-# ---------------------------------------------------------
 with tab1:
-    st.header("Upload Video for Roboflow API Inference")
+    st.header("Upload Video for Roboflow Workflow Inference")
+    col1, col2 = st.columns([2, 1])
     
-    col_u1, col_u2 = st.columns([2, 1])
-    with col_u1:
-        uploaded_video = st.file_uploader("Upload Clip (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
-    with col_u2:
-        if registered_players:
-            primary_player = st.selectbox("Primary Tagged Athlete", registered_players)
-        else:
-            primary_player = st.text_input("Primary Athlete Name", value="Guest Bowler")
-            
-        model_id_input = st.text_input("Roboflow Model/Workflow ID", value=ROBOFLOW_MODEL_ID)
+    with col1:
+        uploaded_video = st.file_uploader("Upload Video (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
+    with col2:
+        primary_player = st.selectbox("Athlete Profile", registered_players) if registered_players else st.text_input("Athlete Name", value="Player 1")
 
     if uploaded_video is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
@@ -172,8 +150,8 @@ with tab1:
         st.subheader("Raw Input Video")
         st.video(input_video_path)
 
-        if st.button("🚀 Run Roboflow API Pipeline"):
-            with st.spinner("Processing Roboflow API predictions & 3D Pose..."):
+        if st.button("🚀 Run Roboflow Workflow"):
+            with st.spinner("Executing Roboflow Serverless Workflow & MediaPipe..."):
                 cap = cv2.VideoCapture(input_video_path)
                 
                 fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -187,53 +165,53 @@ with tab1:
                 out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
                 bowler_3d_angles = defaultdict(list)
-                frame_count = 0
 
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret:
                         break
 
-                    frame_count += 1
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                    # 1. API Query to Roboflow
-                    try:
-                        rf_result = rf_client.infer(frame, model_id=model_id_input)
-                        detections = parse_roboflow_json(rf_result)
-                    except Exception as e:
-                        detections = []
+                    # 1. Query Roboflow Serverless Workflow
+                    workflow_output = process_roboflow_workflow_frame(frame)
 
-                    # 2. Extract MediaPipe 3D Pose
-                    mp_results = mp_pose_engine.process(rgb_frame)
-
+                    # 2. Calculate MediaPipe Pose Angle
                     angle_3d = 160
-                    if mp_results.pose_world_landmarks:
-                        lm = mp_results.pose_world_landmarks.landmark
-                        r_shoulder, r_elbow, r_wrist = lm[12], lm[14], lm[16]
-                        angle_3d = calculate_3d_angle(r_shoulder, r_elbow, r_wrist)
+                    if mp_pose_engine is not None:
+                        mp_results = mp_pose_engine.process(rgb_frame)
+                        if mp_results.pose_world_landmarks:
+                            lm = mp_results.pose_world_landmarks.landmark
+                            angle_3d = calculate_3d_angle(lm[12], lm[14], lm[16])
 
-                    # 3. Draw Bounding Boxes from Roboflow JSON
-                    for idx, det in enumerate(detections):
-                        x1, y1, x2, y2 = det["bbox"]
-                        t_id = det["tracker_id"]
-                        cls_name = det["class"]
-                        conf = det["confidence"]
+                    # 3. Parse and Draw Workflow Output Predictions
+                    if workflow_output and isinstance(workflow_output, list) and len(workflow_output) > 0:
+                        predictions = workflow_output[0].get("predictions", [])
+                        for idx, pred in enumerate(predictions):
+                            if isinstance(pred, dict):
+                                x, y = pred.get("x", 0), pred.get("y", 0)
+                                w, h = pred.get("width", 0), pred.get("height", 0)
+                                t_id = pred.get("tracker_id", pred.get("detection_id", "1"))
+                                cls_name = pred.get("class", "object")
+                                conf = pred.get("confidence", 0.0)
 
-                        bowler_3d_angles[t_id].append(angle_3d)
+                                x1, y1 = int(x - w / 2), int(y - h / 2)
+                                x2, y2 = int(x + w / 2), int(y + h / 2)
 
-                        color = BOWLER_COLORS[idx % len(BOWLER_COLORS)]
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        cv2.putText(
-                            frame,
-                            f"ID: {t_id} | {cls_name} ({conf:.2f}) | 3D Arm: {angle_3d} deg",
-                            (x1, max(20, y1 - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
-                        )
+                                bowler_3d_angles[t_id].append(angle_3d)
 
-                    # Overlay header
+                                color = BOWLER_COLORS[idx % len(BOWLER_COLORS)]
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                                cv2.putText(
+                                    frame,
+                                    f"ID:{t_id} {cls_name} ({conf:.2f}) | Arm: {angle_3d}deg",
+                                    (x1, max(20, y1 - 10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
+                                )
+
+                    # Overlay Title
                     cv2.rectangle(frame, (0, 0), (width, 40), (0, 0, 0), -1)
-                    cv2.putText(frame, "AthlediX AI: Roboflow API + MediaPipe 3D Engine",
+                    cv2.putText(frame, "AthlediX AI: Roboflow Workflow + MediaPipe 3D Engine",
                                 (15, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
                     out.write(frame)
@@ -241,40 +219,17 @@ with tab1:
                 cap.release()
                 out.release()
 
-                st.markdown("---")
                 st.subheader("🎬 AI Processed Output Video")
                 st.video(output_video_path)
 
-                # Process Metrics Leaderboard
-                summary_data = []
-                for b_id, angles_3d in bowler_3d_angles.items():
-                    avg_a3d = np.mean(angles_3d) if angles_3d else 165.0
-                    elbow_flex_3d = (max(angles_3d) - min(angles_3d)) if angles_3d else 0.0
-                    icc_status = "⚠️ Non-Compliant (>15° flex)" if elbow_flex_3d > 15.0 else "✅ Legal Action (ICC Compliant)"
-
-                    summary_data.append({
-                        "Tracker ID": f"Track #{b_id}",
-                        "Avg 3D Arm Angle": f"{round(avg_a3d, 1)}°",
-                        "3D Flex Change": f"{elbow_flex_3d:.1f}°",
-                        "ICC Arm Legality": icc_status
-                    })
-
-                st.subheader("⚡ Roboflow Tracking & Kinematics Summary")
-                if summary_data:
-                    df_summary = pd.DataFrame(summary_data)
-                    st.dataframe(df_summary, use_container_width=True)
-
 # ---------------------------------------------------------
-# TAB 2: DAY-BY-DAY HISTORY
+# TAB 2 & TAB 3: HISTORY & ROSTER
 # ---------------------------------------------------------
 with tab2:
     st.header("📅 Day-by-Day Performance History")
     df_filtered = pd.read_sql_query("SELECT timestamp as 'Date & Time', player_name as 'Athlete', sport as 'Sport', position as 'Position', peak_speed as 'Peak Speed (km/h)', elbow_3d_angle as '3D Arm Angle (deg)', ai_fatigue as 'AI Fatigue (1-5)', readiness_score as 'Match Readiness (%)', performance_score as 'Performance Score (100)' FROM performance_history ORDER BY timestamp DESC", conn)
     st.dataframe(df_filtered, use_container_width=True)
 
-# ---------------------------------------------------------
-# TAB 3: REGISTER PLAYER
-# ---------------------------------------------------------
 with tab3:
     st.header("Add Player Profile")
     col1, col2 = st.columns(2)
