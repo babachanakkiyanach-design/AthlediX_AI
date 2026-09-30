@@ -2,7 +2,7 @@ streamlit
 opencv-python-headless
 numpy
 pandas
-mediapipe
+mediapipe==0.10.14
 inference-sdk
 scipy
 lapx
