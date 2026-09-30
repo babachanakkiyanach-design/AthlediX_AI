@@ -3,4 +3,3 @@ ultralytics
 opencv-python-headless
 pandas
 numpy
-face_recognition
