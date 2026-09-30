@@ -3,8 +3,17 @@ import time
 import numpy as np
 import pandas as pd
 import streamlit as st
-import mediapipe as mp
 from sklearn.ensemble import RandomForestClassifier
+
+# Safe MediaPipe loading for Streamlit Cloud Linux servers
+import mediapipe as mp
+
+try:
+    mp_pose = mp.solutions.pose
+    mp_drawing = mp.solutions.drawing_utils
+except (AttributeError, ModuleNotFoundError):
+    import mediapipe.python.solutions.pose as mp_pose
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
 
 # =========================================================
 # 1. PAGE CONFIGURATION & INSTITUTION BRANDING
@@ -29,7 +38,7 @@ COLLEGE_DATABASE = {
                 "name": "Player 1 (Sathish)",
                 "assigned_role": "Fast Bowler",
                 "baseline_speed": 138.0,      # km/h
-                "yesterday_speed": 132.0,     # Yesterday's performance
+                "yesterday_speed": 132.0,     # Yesterday's speed
                 "acwr": 1.15, "sleep": 8.0, "soreness": 2, "readiness": 9,
                 "matches": 28, "stats": "42 Wickets"
             },
@@ -189,9 +198,7 @@ with tab_vision:
     run_feed = st.checkbox("Turn On Live Camera Feed", value=True)
     frame_placeholder = st.empty()
 
-    mp_pose = mp.solutions.pose
     pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-    mp_drawing = mp.solutions.drawing_utils
 
     if run_feed:
         cap = cv2.VideoCapture(video_url)
