@@ -4,3 +4,5 @@ opencv-python-headless
 numpy
 pandas
 mediapipe
+lapx>=0.5.2
+scipy
